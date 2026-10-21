@@ -1,6 +1,6 @@
 {
-    "name": "uw_ece475_542_t9_app",
-    "short_name": "uw_ece475_542_t9_app",
+    "name": "Fatigue Coach",
+    "short_name": "Fatigue Coach",
     "start_url": ".",
     "display": "standalone",
     "background_color": "#0175C2",

@@ -1,30 +1,70 @@
-// This is a basic Flutter widget test.
-//
-// To perform an interaction with a widget in your test, use the WidgetTester
-// utility in the flutter_test package. For example, you can send tap and scroll
-// gestures. You can also use WidgetTester to find child widgets in the widget
-// tree, read text, and verify that the values of widget properties are correct.
-
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 import 'package:uw_ece475_542_t9_app/main.dart';
 
 void main() {
-  testWidgets('Counter increments smoke test', (WidgetTester tester) async {
-    // Build our app and trigger a frame.
-    await tester.pumpWidget(const MyApp());
+  setUp(() => SharedPreferences.setMockInitialValues({}));
 
-    // Verify that our counter starts at 0.
-    expect(find.text('0'), findsOneWidget);
-    expect(find.text('1'), findsNothing);
+  testWidgets('splash → connect → home, demo wearable runs a set', (
+    tester,
+  ) async {
+    await tester.pumpWidget(const FatigueCoachApp());
+    expect(find.text('Fatigue Coach'), findsOneWidget);
 
-    // Tap the '+' icon and trigger a frame.
-    await tester.tap(find.byIcon(Icons.add));
+    // Splash plays, then fades to the connect page.
+    await tester.pump(const Duration(seconds: 3));
+    await tester.pumpAndSettle();
+    expect(find.text('Connect your wearable'), findsOneWidget);
+    expect(find.text('Not connected'), findsOneWidget);
+
+    await tester.tap(find.text('No hardware? Try the demo wearable'));
+    await tester.pump();
+    expect(find.text('Connected'), findsOneWidget);
+
+    await tester.tap(find.text('Continue'));
+    await tester.pumpAndSettle();
+    expect(find.text('Ready for some curls?'), findsOneWidget);
+    expect(find.text('This week'), findsOneWidget);
+
+    await tester.tap(find.text('Start a set'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Start'));
     await tester.pump();
 
-    // Verify that our counter has incremented.
-    expect(find.text('0'), findsNothing);
-    expect(find.text('1'), findsOneWidget);
+    // Demo curls take ~2.2 s each; give it time for at least one rep.
+    for (var i = 0; i < 60; i++) {
+      await tester.pump(const Duration(milliseconds: 100));
+    }
+    expect(find.text('Reps left'), findsOneWidget);
+    await tester.tap(find.text('End set'));
+    await tester.pumpAndSettle();
+
+    // The set shows on Home and in History.
+    await tester.tap(find.byIcon(Icons.home_outlined));
+    await tester.pumpAndSettle();
+    await tester.scrollUntilVisible(find.text('See all'), 200);
+    expect(find.text('No sets yet'), findsNothing);
+    await tester.tap(find.byIcon(Icons.insights));
+    await tester.pumpAndSettle();
+    expect(find.text('Reps per set'), findsOneWidget);
+
+    // Disconnect from the device page so the demo's timers stop.
+    await tester.tap(find.text('Connected'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Disconnect'));
+    await tester.pumpAndSettle();
+    expect(find.text('Not connected'), findsOneWidget);
+  });
+
+  testWidgets('skip connecting goes straight to home', (tester) async {
+    await tester.pumpWidget(const FatigueCoachApp());
+    await tester.tapAt(const Offset(20, 20)); // a tap skips the splash
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Skip for now'));
+    await tester.pumpAndSettle();
+    expect(find.text('No wearable'), findsOneWidget);
+    expect(find.text('Connect to start'), findsOneWidget);
   });
 }
