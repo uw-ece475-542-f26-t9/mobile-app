@@ -1,122 +1,181 @@
 import 'package:flutter/material.dart';
 
+import 'screens/connect_screen.dart';
+import 'screens/history_screen.dart';
+import 'screens/home_screen.dart';
+import 'screens/splash_screen.dart';
+import 'screens/workout_screen.dart';
+import 'wearable/wearable_controller.dart';
+import 'workout/workout_controller.dart';
+
 void main() {
-  runApp(const MyApp());
+  runApp(const FatigueCoachApp());
 }
 
-class MyApp extends StatelessWidget {
-  const MyApp({super.key});
+/// App flow: animated splash → connect the wearable → main app
+/// (Home, Workout, History).
+class FatigueCoachApp extends StatefulWidget {
+  const FatigueCoachApp({super.key});
 
-  // This widget is the root of your application.
+  @override
+  State<FatigueCoachApp> createState() => _FatigueCoachAppState();
+}
+
+class _FatigueCoachAppState extends State<FatigueCoachApp> {
+  static const _seed = Color(0xFF0F7C8C);
+
+  final _navigator = GlobalKey<NavigatorState>();
+  final _wearable = WearableController();
+  late final _workout = WorkoutController(_wearable);
+
+  @override
+  void dispose() {
+    _workout.dispose();
+    _wearable.dispose();
+    super.dispose();
+  }
+
+  void _replaceWith(Widget page) {
+    _navigator.currentState!.pushReplacement(
+      PageRouteBuilder<void>(
+        transitionDuration: const Duration(milliseconds: 500),
+        pageBuilder: (_, _, _) => page,
+        transitionsBuilder: (_, animation, _, child) =>
+            FadeTransition(opacity: animation, child: child),
+      ),
+    );
+  }
+
+  void _showOnboardingConnect() => _replaceWith(
+    ConnectPage(wearable: _wearable, onContinue: _showHome, onSkip: _showHome),
+  );
+
+  void _showHome() =>
+      _replaceWith(HomeShell(wearable: _wearable, workout: _workout));
+
   @override
   Widget build(BuildContext context) {
-    return MaterialApp(
-      title: 'Flutter Demo',
-      theme: ThemeData(
-        // This is the theme of your application.
-        //
-        // TRY THIS: Try running your application with "flutter run". You'll see
-        // the application has a purple toolbar. Then, without quitting the app,
-        // try changing the seedColor in the colorScheme below to Colors.green
-        // and then invoke "hot reload" (save your changes or press the "hot
-        // reload" button in a Flutter-supported IDE, or press "r" if you used
-        // the command line to start the app).
-        //
-        // Notice that the counter didn't reset back to zero; the application
-        // state is not lost during the reload. To reset the state, use hot
-        // restart instead.
-        //
-        // This works for code too, not just values: Most code changes can be
-        // tested with just a hot reload.
-        colorScheme: .fromSeed(seedColor: Colors.deepPurple),
+    ThemeData theme(Brightness brightness) => ThemeData(
+      colorScheme: ColorScheme.fromSeed(
+        seedColor: _seed,
+        brightness: brightness,
       ),
-      home: const MyHomePage(title: 'Flutter Demo Home Page'),
+      cardTheme: const CardThemeData(
+        elevation: 0,
+        margin: EdgeInsets.symmetric(vertical: 4),
+      ),
+    );
+
+    return MaterialApp(
+      title: 'Fatigue Coach',
+      navigatorKey: _navigator,
+      debugShowCheckedModeBanner: false,
+      theme: theme(Brightness.light),
+      darkTheme: theme(Brightness.dark),
+      home: SplashScreen(onDone: _showOnboardingConnect),
     );
   }
 }
 
-class MyHomePage extends StatefulWidget {
-  const MyHomePage({super.key, required this.title});
+class HomeShell extends StatefulWidget {
+  const HomeShell({super.key, required this.wearable, required this.workout});
 
-  // This widget is the home page of your application. It is stateful, meaning
-  // that it has a State object (defined below) that contains fields that affect
-  // how it looks.
-
-  // This class is the configuration for the state. It holds the values (in this
-  // case the title) provided by the parent (in this case the App widget) and
-  // used by the build method of the State. Fields in a Widget subclass are
-  // always marked "final".
-
-  final String title;
+  final WearableController wearable;
+  final WorkoutController workout;
 
   @override
-  State<MyHomePage> createState() => _MyHomePageState();
+  State<HomeShell> createState() => _HomeShellState();
 }
 
-class _MyHomePageState extends State<MyHomePage> {
-  int _counter = 0;
+class _HomeShellState extends State<HomeShell> {
+  static const _workoutTab = 1, _historyTab = 2;
 
-  void _incrementCounter() {
-    setState(() {
-      // This call to setState tells the Flutter framework that something has
-      // changed in this State, which causes it to rerun the build method below
-      // so that the display can reflect the updated values. If we changed
-      // _counter without calling setState(), then the build method would not be
-      // called again, and so nothing would appear to happen.
-      _counter++;
-    });
+  int _tab = 0;
+
+  void _goTo(int tab) => setState(() => _tab = tab);
+
+  void _manageDevice() {
+    Navigator.of(context).push(
+      MaterialPageRoute<void>(
+        builder: (context) => ConnectPage(
+          wearable: widget.wearable,
+          continueLabel: 'Done',
+          onContinue: () => Navigator.of(context).pop(),
+        ),
+      ),
+    );
   }
 
   @override
   Widget build(BuildContext context) {
-    // This method is rerun every time setState is called, for instance as done
-    // by the _incrementCounter method above.
-    //
-    // The Flutter framework has been optimized to make rerunning build methods
-    // fast, so that you can just rebuild anything that needs updating rather
-    // than having to individually change instances of widgets.
+    const titles = ['Home', 'Workout', 'History'];
     return Scaffold(
       appBar: AppBar(
-        // TRY THIS: Try changing the color here to a specific color (to
-        // Colors.amber, perhaps?) and trigger a hot reload to see the AppBar
-        // change color while the other colors stay the same.
-        backgroundColor: Theme.of(context).colorScheme.inversePrimary,
-        // Here we take the value from the MyHomePage object that was created by
-        // the App.build method, and use it to set our appbar title.
-        title: Text(widget.title),
+        title: Text(titles[_tab]),
+        actions: [
+          _ConnectionChip(wearable: widget.wearable, onTap: _manageDevice),
+          const SizedBox(width: 12),
+        ],
       ),
-      body: Center(
-        // Center is a layout widget. It takes a single child and positions it
-        // in the middle of the parent.
-        child: Column(
-          // Column is also a layout widget. It takes a list of children and
-          // arranges them vertically. By default, it sizes itself to fit its
-          // children horizontally, and tries to be as tall as its parent.
-          //
-          // Column has various properties to control how it sizes itself and
-          // how it positions its children. Here we use mainAxisAlignment to
-          // center the children vertically; the main axis here is the vertical
-          // axis because Columns are vertical (the cross axis would be
-          // horizontal).
-          //
-          // TRY THIS: Invoke "debug painting" (choose the "Toggle Debug Paint"
-          // action in the IDE, or press "p" in the console), to see the
-          // wireframe for each widget.
-          mainAxisAlignment: .center,
-          children: [
-            const Text('You have pushed the button this many times:'),
-            Text(
-              '$_counter',
-              style: Theme.of(context).textTheme.headlineMedium,
-            ),
-          ],
-        ),
+      body: IndexedStack(
+        index: _tab,
+        children: [
+          HomeScreen(
+            workout: widget.workout,
+            onManageDevice: _manageDevice,
+            onStartSet: () => _goTo(_workoutTab),
+            onSeeHistory: () => _goTo(_historyTab),
+          ),
+          WorkoutScreen(workout: widget.workout, onConnect: _manageDevice),
+          HistoryScreen(workout: widget.workout),
+        ],
       ),
-      floatingActionButton: FloatingActionButton(
-        onPressed: _incrementCounter,
-        tooltip: 'Increment',
-        child: const Icon(Icons.add),
+      bottomNavigationBar: NavigationBar(
+        selectedIndex: _tab,
+        onDestinationSelected: _goTo,
+        destinations: const [
+          NavigationDestination(
+            icon: Icon(Icons.home_outlined),
+            selectedIcon: Icon(Icons.home),
+            label: 'Home',
+          ),
+          NavigationDestination(
+            icon: Icon(Icons.fitness_center),
+            label: 'Workout',
+          ),
+          NavigationDestination(icon: Icon(Icons.insights), label: 'History'),
+        ],
       ),
+    );
+  }
+}
+
+/// Always-visible connection state in the app bar; tap to manage the device.
+class _ConnectionChip extends StatelessWidget {
+  const _ConnectionChip({required this.wearable, required this.onTap});
+
+  final WearableController wearable;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    return ListenableBuilder(
+      listenable: wearable,
+      builder: (context, _) {
+        final scheme = Theme.of(context).colorScheme;
+        final (color, label) = switch (wearable.status) {
+          LinkStatus.connected => (const Color(0xFF2E9E6A), 'Connected'),
+          LinkStatus.scanning => (scheme.tertiary, 'Searching'),
+          LinkStatus.connecting => (scheme.tertiary, 'Connecting'),
+          LinkStatus.disconnected => (scheme.outline, 'Offline'),
+        };
+        return ActionChip(
+          onPressed: onTap,
+          avatar: Icon(Icons.circle, size: 10, color: color),
+          label: Text(label),
+          side: BorderSide(color: color.withValues(alpha: 0.5)),
+        );
+      },
     );
   }
 }
