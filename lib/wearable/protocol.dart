@@ -1,13 +1,18 @@
 import 'dart:typed_data';
 
-/// BLE identifiers advertised by the ESP32 firmware (esp32_imu_ble.ino).
-/// Keep these in sync with the #defines in the sketch.
+/// BLE identifiers advertised by the ESP32 firmware: esp32_imu_ble.ino for
+/// the IMU, and myoware_ble.ino in the embedded repo for the EMG sensor. Both
+/// share one service, each with its own characteristic. Keep these in sync
+/// with the #defines in the sketches.
 class WearableProtocol {
   static const deviceName = 'ESP32-IMU';
   static const serviceUuid = '4fafc201-1fb5-459e-8fcc-c5c9c331914b';
   static const imuCharUuid = 'beb5483e-36e1-4688-b7f5-ea07361b26a8';
+  static const emgCharUuid = '53e27fb3-6de1-4f27-8303-d663c79b818b';
   static const sampleRateHz = 50;
   static const packetLength = 16;
+  static const emgSnapshotHz = 10;
+  static const emgPacketLength = 14;
 }
 
 /// One IMU reading from the forearm sensor.
@@ -53,8 +58,57 @@ class ImuSample {
   }
 }
 
+/// A summary of the raw MyoWare EMG signal over one short window. The
+/// firmware samples at 2 kHz and sends one of these every 100 ms. Voltages
+/// are as measured at the ESP32's ADC pin.
+class EmgSnapshot {
+  const EmgSnapshot({
+    required this.timestampMs,
+    required this.sampleCount,
+    required this.meanMv,
+    required this.rmsMv,
+    required this.minMv,
+    required this.maxMv,
+  });
+
+  /// Milliseconds since the ESP32 booted, at the end of the window.
+  final int timestampMs;
+
+  /// Raw samples in the window (about 200).
+  final int sampleCount;
+
+  /// DC level the raw signal sits on, in mV.
+  final int meanMv;
+
+  /// RMS of the signal around [meanMv], in mV. Rises when the muscle
+  /// contracts.
+  final int rmsMv;
+
+  /// Lowest and highest raw sample in the window, in mV.
+  final int minMv, maxMv;
+
+  /// Decodes the 14-byte little-endian packet:
+  ///   [0..3]   uint32 timestamp (ms)
+  ///   [4..5]   uint16 sample count
+  ///   [6..13]  uint16 mean, rms, min, max (mV)
+  /// Returns null if the packet is too short.
+  static EmgSnapshot? fromPacket(List<int> bytes) {
+    if (bytes.length < WearableProtocol.emgPacketLength) return null;
+    final data = ByteData.sublistView(Uint8List.fromList(bytes));
+    int u16(int offset) => data.getUint16(offset, Endian.little);
+    return EmgSnapshot(
+      timestampMs: data.getUint32(0, Endian.little),
+      sampleCount: u16(4),
+      meanMv: u16(6),
+      rmsMv: u16(8),
+      minMv: u16(10),
+      maxMv: u16(12),
+    );
+  }
+}
+
 /// Output of the on-board fatigue model. The current firmware only streams
-/// IMU data, so for now this comes from the demo wearable only.
+/// raw sensor data, so for now this comes from the demo wearable only.
 class FatigueEstimate {
   const FatigueEstimate({required this.fatigue, required this.repsLeft});
 

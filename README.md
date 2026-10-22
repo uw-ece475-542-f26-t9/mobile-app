@@ -15,7 +15,7 @@ shows fatigue and reps left, and keeps a history of your sets.
   - [2. Clone the repo](#2-clone-the-repo)
   - [3. Install Flutter and Java with mise](#3-install-flutter-and-java-with-mise)
   - [4. Get the packages and check your setup](#4-get-the-packages-and-check-your-setup)
-  - [5. Optional: Android and iOS toolchains](#5-optional-android-and-ios-toolchains)
+  - [5. Optional: Android, iOS and Linux toolchains](#5-optional-android-ios-and-linux-toolchains)
 - [Running the app](#running-the-app)
 - [Connecting to the wearable](#connecting-to-the-wearable)
 - [Project layout](#project-layout)
@@ -46,9 +46,11 @@ The app has four parts:
 4. **Connection chip.** The chip in the top-right corner shows whether the
    wearable is connected. Tap it to reconnect or disconnect.
 
-> **Note:** the current firmware only streams IMU data. Rep counting works
-> with the real device, but **fatigue % and reps left only appear with the
-> demo wearable** until the firmware also sends the model's output. See
+> **Note:** the current firmware streams raw sensor data only: IMU motion,
+> and EMG snapshots from a separate sketch. Rep counting works with the IMU
+> firmware and EMG readings show under **Sensor check**, but **fatigue % and
+> reps left only appear with the demo wearable** until the firmware also
+> sends the model's output. See
 > [Connecting to the wearable](#connecting-to-the-wearable).
 
 ---
@@ -158,10 +160,11 @@ flutter doctor
 work on the UI. Red lines for Android or Xcode only matter if you want to run
 on a phone (next step).
 
-### 5. Optional: Android and iOS toolchains
+### 5. Optional: Android, iOS and Linux toolchains
 
-To test with the **real wearable**, you need to run the app on a phone (or in
-Chrome with Web Bluetooth; see [below](#connecting-to-the-wearable)).
+To test with the **real wearable**, you need to run the app on a phone, as a
+Linux desktop app, or in Chrome with Web Bluetooth (see
+[below](#connecting-to-the-wearable)).
 
 **Android (any OS)**
 
@@ -209,6 +212,52 @@ it separately.
    **Runner** target → **Signing & Capabilities**, and choose your Apple ID
    team. A free personal team is enough for running on your own phone.
 
+**Linux desktop (Ubuntu/Debian)**
+
+The Linux build uses your computer's own Bluetooth adapter, so you can test
+with the real wearable without a phone.
+
+1. Install the desktop build tools:
+
+   ```bash
+   sudo apt install clang cmake ninja-build pkg-config libgtk-3-dev liblzma-dev
+   ```
+
+2. Install BlueZ (Linux's Bluetooth service; most desktops already have it)
+   and make sure it's running:
+
+   ```bash
+   sudo apt install bluez
+   ```
+
+   ```bash
+   sudo systemctl enable --now bluetooth
+   ```
+
+3. Check that your adapter is there and powered on. The output should
+   include `Powered: yes`:
+
+   ```bash
+   bluetoothctl show
+   ```
+
+   If it says `Powered: no`, run `bluetoothctl power on`.
+
+4. Confirm Flutter sees the Linux target. `flutter doctor` should show a
+   green **Linux toolchain** line, and `flutter devices` should list
+   **Linux (desktop)**:
+
+   ```bash
+   flutter doctor
+   ```
+
+   ```bash
+   flutter devices
+   ```
+
+You don't need root or any extra permission setup. The app talks to BlueZ
+over D-Bus as your normal user.
+
 Run `flutter doctor` again until the platforms you care about are green.
 
 ---
@@ -241,25 +290,66 @@ flutter run -d <device-id>
 flutter run -d macos
 ```
 
+**As a Linux desktop app** (needs the
+[Linux toolchain](#5-optional-android-ios-and-linux-toolchains)):
+
+```bash
+flutter run -d linux
+```
+
+Hot reload works the same way as in Chrome. To build a standalone binary
+instead:
+
+```bash
+flutter build linux
+```
+
+The app ends up at `build/linux/x64/release/bundle/uw_ece475_542_t9_app`. Run
+it from that folder; it needs the `lib/` and `data/` folders next to it.
+
 ---
 
 ## Connecting to the wearable
 
-The ESP32 firmware (`esp32_imu_ble.ino`, kept by the hardware side of the
-team) advertises as **`ESP32-IMU`** with this BLE layout:
+There are two ESP32 sketches for now, both kept by the hardware side of the
+team. They share one BLE service, and each sensor has its own
+characteristic, so they can later be merged into one sketch without changing
+the app:
+
+- `esp32_imu_ble.ino` (class tutorial) advertises as **`ESP32-IMU`** and
+  sends IMU packets.
+- `myoware_ble/myoware_ble.ino` in the
+  [embedded repo](https://github.com/uw-ece475-542-f26-t9/embedded) advertises
+  as **`ESP32-EMG`** and sends EMG snapshots from the MyoWare 2.0.
 
 | | UUID |
 |---|---|
 | Service | `4fafc201-1fb5-459e-8fcc-c5c9c331914b` |
 | IMU characteristic (notify) | `beb5483e-36e1-4688-b7f5-ea07361b26a8` |
+| EMG characteristic (notify) | `53e27fb3-6de1-4f27-8303-d663c79b818b` |
 
-It sends a 16-byte little-endian packet every 20 ms (50 Hz):
+The app connects to a device that has either characteristic or both.
+
+The IMU characteristic sends a 16-byte little-endian packet every 20 ms
+(50 Hz):
 
 | Bytes | Type | Field | Units |
 |---|---|---|---|
 | 0–3 | uint32 | timestamp | ms since boot |
 | 4–9 | int16 ×3 | ax, ay, az | milli-g (1000 = 1 g) |
 | 10–15 | int16 ×3 | gx, gy, gz | 0.1 °/s (10 = 1 °/s) |
+
+The EMG sketch samples the MyoWare's RAW output at 2 kHz. Every 100 ms
+(10 Hz) it sends a 14-byte little-endian snapshot of the samples from that
+window (about 200). Voltages are as measured at the ESP32's ADC pin:
+
+| Bytes | Type | Field | Units |
+|---|---|---|---|
+| 0–3 | uint32 | timestamp | ms since boot, at the end of the window |
+| 4–5 | uint16 | sample count | samples in the window |
+| 6–7 | uint16 | mean | mV (the DC level the signal sits on) |
+| 8–9 | uint16 | RMS around the mean | mV (rises when the muscle contracts) |
+| 10–13 | uint16 ×2 | min, max | mV |
 
 These constants live in
 [`lib/wearable/protocol.dart`](lib/wearable/protocol.dart). **If you change
@@ -268,12 +358,13 @@ tests in `test/wearable_test.dart` check the packet decoding.
 
 To connect:
 
-1. Flash the sketch to the ESP32 and power it on. With `USE_FAKE_DATA 1` it
-   streams sine waves, so you can test without an IMU wired up.
+1. Flash a sketch to the ESP32 and power it on. With `USE_FAKE_DATA 1` the
+   IMU sketch streams sine waves, so you can test without an IMU wired up.
 2. In the app, tap **Connect**. Devices running our firmware appear under
    **Nearby wearables**; tap **Connect** next to one.
-3. The status card turns green and **Sensor check** shows about 50
-   packets/s.
+3. The status card turns green. **Sensor check** shows about 50 packets/s
+   from the IMU sketch, or 10 from the EMG sketch. With the EMG sketch, flex
+   your biceps and the muscle activity line should jump.
 
 Things to know:
 
@@ -289,6 +380,11 @@ Things to know:
 - **Chrome:** Web Bluetooth works in desktop Chrome on macOS and Windows.
   Tapping Connect opens Chrome's own device picker. It doesn't work in Safari
   or Firefox.
+- **Linux desktop:** the app scans through BlueZ, so Bluetooth has to be on
+  (`bluetoothctl show` says `Powered: yes`). **Don't pair the ESP32 in your
+  system Bluetooth settings.** The app connects to it directly, and a
+  connection from the system settings can stop the app from seeing it. If you
+  already paired it, remove it with `bluetoothctl remove <MAC address>`.
 - **Fatigue and reps left:** the app is ready to display them
   (`FatigueEstimate` in `protocol.dart`), but the firmware doesn't send them
   yet. Once the on-board model is running, it needs another characteristic for
@@ -303,7 +399,7 @@ lib/
 ├── main.dart                   App entry, theme, navigation (splash → connect → home tabs)
 ├── screens/
 │   ├── splash_screen.dart      Animated intro
-│   ├── connect_screen.dart     Scan / connect / disconnect, live sensor check
+│   ├── connect_screen.dart     Scan / connect / disconnect, live IMU and EMG check
 │   ├── home_screen.dart        Dashboard: device, start a set, weekly activity, recent sets
 │   ├── workout_screen.dart     Live set: reps, fatigue ring, advice banner, motion graph
 │   └── history_screen.dart     All saved sets with stats and a reps chart
@@ -316,7 +412,7 @@ lib/
 │   ├── workout_controller.dart Set state, fatigue advice, haptics
 │   └── history_store.dart      Saves sets on the device (shared_preferences)
 └── widgets/
-    ├── charts.dart             Fatigue ring, motion line, bar charts
+    ├── charts.dart             Fatigue ring, motion/EMG line, bar charts
     └── tiles.dart              Stat tile and set row shared by Home and History
 test/
 ├── wearable_test.dart          Packet decoding and rep counting
@@ -401,8 +497,21 @@ the Command Line Tools update it lists (or update Xcode).
 
 **`flutter doctor`: "Unable to locate Android SDK"**  
 Install Android Studio and the SDK (see
-[step 5](#5-optional-android-and-ios-toolchains)). You only need this to run
+[step 5](#5-optional-android-ios-and-linux-toolchains)). You only need this to run
 on Android.
+
+**`flutter doctor`: Linux toolchain errors ("clang", "CMake", "GTK 3.0 development libraries")**  
+Install the packages from the
+[Linux desktop step](#5-optional-android-ios-and-linux-toolchains). If the
+build fails with `cannot find -lstdc++`, also install the `libstdc++-*-dev`
+package that matches your clang version (e.g. `sudo apt install libstdc++-14-dev`).
+
+**Linux: Connect finds nothing, or says Bluetooth is off**  
+Check `systemctl status bluetooth` (should be `active (running)`) and
+`bluetoothctl show` (should say `Powered: yes`). If the adapter is blocked,
+`rfkill list` shows `Soft blocked: yes`; run `rfkill unblock bluetooth`. Also
+make sure the ESP32 isn't paired or connected in your system Bluetooth
+settings.
 
 **`flutter doctor`: "Xcode installation is incomplete" / "CocoaPods not installed"**  
 Install the full Xcode app and CocoaPods (see step 5). You only need these
@@ -410,7 +519,7 @@ for iOS and macOS builds.
 
 **The wearable never appears when scanning**  
 Check that it's powered on and advertising (the serial monitor prints
-`Advertising as ESP32-IMU`), that Bluetooth is on, and that no other phone is
+`Advertising as ESP32-IMU` or `Advertising as ESP32-EMG`), that Bluetooth is on, and that no other phone is
 connected to it. Tap **Connect** again; each scan lasts 8 seconds.
 
 **"This device is not running the Team 9 firmware."**  

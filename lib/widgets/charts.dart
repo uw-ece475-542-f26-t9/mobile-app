@@ -2,14 +2,24 @@ import 'dart:math';
 
 import 'package:flutter/material.dart';
 
-/// A live line of recent values centered on zero, e.g. arm angular velocity.
+/// A live line of recent values centered on zero, e.g. arm angular velocity,
+/// or rising from the bottom edge when [signed] is false, e.g. EMG amplitude.
 class MotionLine extends StatelessWidget {
-  const MotionLine({super.key, required this.values, this.range = 180});
+  const MotionLine({
+    super.key,
+    required this.values,
+    this.range = 180,
+    this.signed = true,
+  });
 
   final List<double> values;
 
-  /// Value that maps to the top edge (and -range to the bottom).
+  /// Value that maps to the top edge (and -range, or 0 when not [signed], to
+  /// the bottom).
   final double range;
+
+  /// Whether values go negative. If not, zero sits on the bottom edge.
+  final bool signed;
 
   @override
   Widget build(BuildContext context) {
@@ -18,6 +28,7 @@ class MotionLine extends StatelessWidget {
       painter: _MotionPainter(
         values: List.of(values),
         range: range,
+        signed: signed,
         line: scheme.primary,
         axis: scheme.outlineVariant,
       ),
@@ -30,21 +41,25 @@ class _MotionPainter extends CustomPainter {
   _MotionPainter({
     required this.values,
     required this.range,
+    required this.signed,
     required this.line,
     required this.axis,
   });
 
   final List<double> values;
   final double range;
+  final bool signed;
   final Color line;
   final Color axis;
 
   @override
   void paint(Canvas canvas, Size size) {
-    final mid = size.height / 2;
+    // y of the zero line, and pixels per unit of range above it.
+    final zero = signed ? size.height / 2 : size.height;
+    final scale = zero / range;
     canvas.drawLine(
-      Offset(0, mid),
-      Offset(size.width, mid),
+      Offset(0, zero),
+      Offset(size.width, zero),
       Paint()
         ..color = axis
         ..strokeWidth = 1,
@@ -54,7 +69,7 @@ class _MotionPainter extends CustomPainter {
     final path = Path();
     final dx = size.width / (values.length - 1);
     for (var i = 0; i < values.length; i++) {
-      final y = mid - (values[i].clamp(-range, range) / range) * mid;
+      final y = zero - values[i].clamp(signed ? -range : 0, range) * scale;
       i == 0 ? path.moveTo(0, y) : path.lineTo(i * dx, y);
     }
     canvas.drawPath(
