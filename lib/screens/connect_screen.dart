@@ -1,7 +1,10 @@
+import 'dart:math';
+
 import 'package:flutter/material.dart';
 
 import '../wearable/protocol.dart';
 import '../wearable/wearable_controller.dart';
+import '../widgets/charts.dart';
 
 /// Full-screen page for pairing with the wearable. Shown after the splash
 /// during onboarding, and again from inside the app to manage the device.
@@ -381,16 +384,22 @@ class _LiveSensorCard extends StatelessWidget {
                 Text('${wearable.sampleRate} packets/s', style: text.bodySmall),
               ],
             ),
-            const SizedBox(height: 12),
-            _AxisRow(
-              label: 'Accel (g)',
-              values: [f(s?.ax, 2), f(s?.ay, 2), f(s?.az, 2)],
-            ),
-            const SizedBox(height: 8),
-            _AxisRow(
-              label: 'Gyro (°/s)',
-              values: [f(s?.gx, 0), f(s?.gy, 0), f(s?.gz, 0)],
-            ),
+            if (wearable.hasImu) ...[
+              const SizedBox(height: 12),
+              _AxisRow(
+                label: 'Accel (g)',
+                values: [f(s?.ax, 2), f(s?.ay, 2), f(s?.az, 2)],
+              ),
+              const SizedBox(height: 8),
+              _AxisRow(
+                label: 'Gyro (°/s)',
+                values: [f(s?.gx, 0), f(s?.gy, 0), f(s?.gz, 0)],
+              ),
+            ],
+            if (wearable.hasEmg) ...[
+              const SizedBox(height: 12),
+              _EmgCheck(wearable: wearable),
+            ],
           ],
         ),
       ),
@@ -398,11 +407,66 @@ class _LiveSensorCard extends StatelessWidget {
   }
 }
 
+/// The latest EMG snapshot over a chart of recent RMS. Redraws on every
+/// snapshot (10 Hz) rather than with the rest of the card, so flexing shows
+/// up right away.
+class _EmgCheck extends StatelessWidget {
+  const _EmgCheck({required this.wearable});
+
+  final WearableController wearable;
+
+  @override
+  Widget build(BuildContext context) {
+    final text = Theme.of(context).textTheme;
+    return StreamBuilder<EmgSnapshot>(
+      stream: wearable.emg,
+      builder: (context, _) {
+        final e = wearable.latestEmg;
+        final rms = [for (final s in wearable.emgHistory) s.rmsMv.toDouble()];
+        String f(int? v) => v?.toString() ?? '–';
+        return Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            _AxisRow(
+              label: 'EMG (mV)',
+              names: const ['rms', 'min', 'max'],
+              values: [f(e?.rmsMv), f(e?.minMv), f(e?.maxMv)],
+            ),
+            const SizedBox(height: 12),
+            SizedBox(
+              height: 64,
+              // Scale to the biggest recent value, but not below 50 mV so
+              // resting noise stays near the bottom.
+              child: MotionLine(
+                values: rms,
+                range: rms.fold(50, max),
+                signed: false,
+              ),
+            ),
+            const SizedBox(height: 4),
+            Text(
+              'Muscle activity (RMS), last ${WearableController.emgWindow} s',
+              style: text.bodySmall,
+            ),
+          ],
+        );
+      },
+    );
+  }
+}
+
 class _AxisRow extends StatelessWidget {
-  const _AxisRow({required this.label, required this.values});
+  const _AxisRow({
+    required this.label,
+    required this.values,
+    this.names = const ['x', 'y', 'z'],
+  });
 
   final String label;
   final List<String> values;
+
+  /// Shown before each value.
+  final List<String> names;
 
   @override
   Widget build(BuildContext context) {
@@ -413,7 +477,7 @@ class _AxisRow extends StatelessWidget {
         for (final (i, v) in values.indexed)
           Expanded(
             child: Text(
-              '${'xyz'[i]} $v',
+              '${names[i]} $v',
               style: text.bodyMedium?.copyWith(
                 fontFeatures: const [FontFeature.tabularFigures()],
               ),

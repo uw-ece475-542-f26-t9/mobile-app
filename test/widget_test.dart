@@ -23,6 +23,13 @@ void main() {
     await tester.pump();
     expect(find.text('Connected'), findsOneWidget);
 
+    // The sensor check shows both sensors, and EMG snapshots arrive.
+    expect(find.text('Gyro (°/s)'), findsOneWidget);
+    expect(find.text('EMG (mV)'), findsOneWidget);
+    expect(find.text('rms –'), findsOneWidget);
+    await tester.pump(const Duration(milliseconds: 300));
+    expect(find.text('rms –'), findsNothing);
+
     await tester.tap(find.text('Continue'));
     await tester.pumpAndSettle();
     expect(find.text('Ready for some curls?'), findsOneWidget);

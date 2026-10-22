@@ -33,8 +33,23 @@ void main() {
     expect(s.gz, 0.0);
   });
 
+  test('decodes the EMG snapshot packet', () {
+    // Same layout as myoware_ble.ino: sample count, then mean, rms, min and
+    // max in mV.
+    final s = EmgSnapshot.fromPacket(
+      _packet(123456, [200, 1650, 42, 1520, 2900]),
+    )!;
+    expect(s.timestampMs, 123456);
+    expect(s.sampleCount, 200);
+    expect(s.meanMv, 1650);
+    expect(s.rmsMv, 42);
+    expect(s.minMv, 1520);
+    expect(s.maxMv, 2900);
+  });
+
   test('rejects short packets', () {
     expect(ImuSample.fromPacket(List.filled(10, 0)), isNull);
+    expect(EmgSnapshot.fromPacket(List.filled(10, 0)), isNull);
   });
 
   test('counts one rep per curl cycle on the dominant axis', () {

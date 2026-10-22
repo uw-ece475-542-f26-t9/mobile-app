@@ -30,6 +30,10 @@ class FoundWearable {
 class WearableController extends ChangeNotifier {
   static final _serviceGuid = Guid(WearableProtocol.serviceUuid);
   static final _imuCharGuid = Guid(WearableProtocol.imuCharUuid);
+  static final _emgCharGuid = Guid(WearableProtocol.emgCharUuid);
+
+  /// Seconds of EMG snapshots kept for the live chart.
+  static const emgWindow = 10;
 
   LinkStatus _status = LinkStatus.disconnected;
   List<FoundWearable> _found = const [];
@@ -38,14 +42,18 @@ class WearableController extends ChangeNotifier {
   String? _error;
   int _sampleRate = 0;
   ImuSample? _latest;
+  bool _hasImu = false;
+  bool _hasEmg = false;
+  final List<EmgSnapshot> _emgHistory = [];
 
   final _samples = StreamController<ImuSample>.broadcast();
+  final _emg = StreamController<EmgSnapshot>.broadcast();
   final _fatigue = StreamController<FatigueEstimate>.broadcast();
   final _demo = DemoWearable();
   final _subs = <StreamSubscription<dynamic>>[];
   StreamSubscription<List<ScanResult>>? _scanSub;
   Timer? _rateTimer;
-  int _samplesThisSecond = 0;
+  int _packetsThisSecond = 0;
   bool _userDisconnect = false;
 
   LinkStatus get status => _status;
@@ -62,7 +70,17 @@ class WearableController extends ChangeNotifier {
   int get sampleRate => _sampleRate;
   ImuSample? get latest => _latest;
 
+  /// Which sensors the connected wearable streams. The IMU and EMG run as
+  /// separate sketches for now, so a real device may have only one.
+  bool get hasImu => _hasImu;
+  bool get hasEmg => _hasEmg;
+
+  /// EMG snapshots from the last [emgWindow] seconds, oldest first.
+  List<EmgSnapshot> get emgHistory => _emgHistory;
+  EmgSnapshot? get latestEmg => _emgHistory.lastOrNull;
+
   Stream<ImuSample> get samples => _samples.stream;
+  Stream<EmgSnapshot> get emg => _emg.stream;
   Stream<FatigueEstimate> get fatigue => _fatigue.stream;
 
   Future<void> scan() async {
@@ -152,22 +170,30 @@ class WearableController extends ChangeNotifier {
         mtu: null,
       );
       final services = await device.discoverServices();
-      final imuChar = services
+      final chars = services
           .where((s) => s.uuid == _serviceGuid)
           .expand((s) => s.characteristics)
-          .where((c) => c.uuid == _imuCharGuid)
-          .firstOrNull;
-      if (imuChar == null) {
+          .toList();
+      final imuChar = chars.where((c) => c.uuid == _imuCharGuid).firstOrNull;
+      final emgChar = chars.where((c) => c.uuid == _emgCharGuid).firstOrNull;
+      if (imuChar == null && emgChar == null) {
         throw 'This device is not running the Team 9 firmware.';
       }
 
-      final valueSub = imuChar.onValueReceived.listen((bytes) {
-        final sample = ImuSample.fromPacket(bytes);
-        if (sample != null) _onSample(sample);
-      });
-      device.cancelWhenDisconnected(valueSub);
-      _subs.add(valueSub);
-      await imuChar.setNotifyValue(true);
+      if (imuChar != null) {
+        await _subscribe(device, imuChar, (bytes) {
+          final sample = ImuSample.fromPacket(bytes);
+          if (sample != null) _onSample(sample);
+        });
+      }
+      if (emgChar != null) {
+        await _subscribe(device, emgChar, (bytes) {
+          final snapshot = EmgSnapshot.fromPacket(bytes);
+          if (snapshot != null) _onEmg(snapshot);
+        });
+      }
+      _hasImu = imuChar != null;
+      _hasEmg = emgChar != null;
 
       _subs.add(
         device.connectionState.listen((state) {
@@ -191,13 +217,27 @@ class WearableController extends ChangeNotifier {
     }
   }
 
+  Future<void> _subscribe(
+    BluetoothDevice device,
+    BluetoothCharacteristic characteristic,
+    void Function(List<int> bytes) onValue,
+  ) async {
+    final valueSub = characteristic.onValueReceived.listen(onValue);
+    device.cancelWhenDisconnected(valueSub);
+    _subs.add(valueSub);
+    await characteristic.setNotifyValue(true);
+  }
+
   void connectDemo() {
     if (_status == LinkStatus.connected) return;
     _error = null;
     _subs
       ..add(_demo.samples.listen(_onSample))
+      ..add(_demo.emg.listen(_onEmg))
       ..add(_demo.fatigue.listen(_fatigue.add));
     _demo.start();
+    _hasImu = true;
+    _hasEmg = true;
     _connected = const FoundWearable(
       id: 'demo',
       name: 'Demo wearable',
@@ -220,16 +260,24 @@ class WearableController extends ChangeNotifier {
 
   void _onSample(ImuSample sample) {
     _latest = sample;
-    _samplesThisSecond++;
+    _packetsThisSecond++;
     _samples.add(sample);
+  }
+
+  void _onEmg(EmgSnapshot snapshot) {
+    _packetsThisSecond++;
+    _emgHistory.add(snapshot);
+    const maxSnapshots = emgWindow * WearableProtocol.emgSnapshotHz;
+    if (_emgHistory.length > maxSnapshots) _emgHistory.removeAt(0);
+    _emg.add(snapshot);
   }
 
   void _startRateTimer() {
     _rateTimer?.cancel();
-    _samplesThisSecond = 0;
+    _packetsThisSecond = 0;
     _rateTimer = Timer.periodic(const Duration(seconds: 1), (_) {
-      _sampleRate = _samplesThisSecond;
-      _samplesThisSecond = 0;
+      _sampleRate = _packetsThisSecond;
+      _packetsThisSecond = 0;
       notifyListeners();
     });
   }
@@ -244,6 +292,9 @@ class WearableController extends ChangeNotifier {
     _rateTimer = null;
     _sampleRate = 0;
     _latest = null;
+    _hasImu = false;
+    _hasEmg = false;
+    _emgHistory.clear();
     _connected = null;
     _setStatus(LinkStatus.disconnected);
   }
@@ -268,6 +319,7 @@ class WearableController extends ChangeNotifier {
     _scanSub?.cancel();
     _demo.dispose();
     _samples.close();
+    _emg.close();
     _fatigue.close();
     super.dispose();
   }
