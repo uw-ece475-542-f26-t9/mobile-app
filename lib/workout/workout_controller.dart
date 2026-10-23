@@ -2,23 +2,19 @@ import 'dart:async';
 import 'dart:math';
 
 import 'package:flutter/foundation.dart';
-import 'package:flutter/services.dart';
 
 import '../wearable/protocol.dart';
 import '../wearable/wearable_controller.dart';
 import 'history_store.dart';
-import 'rep_counter.dart';
 
-/// How close the lifter is to the end of the set.
-enum SetAdvice { keepGoing, almostDone, stop }
-
-/// Runs a set: counts reps, tracks fatigue, and keeps the history.
+/// Runs a set: counts reps from the wearable's rep counter, and keeps the
+/// history.
 class WorkoutController extends ChangeNotifier {
   WorkoutController(this.wearable, {HistoryStore? store})
     : _store = store ?? HistoryStore() {
     _subs
       ..add(wearable.samples.listen(_onSample))
-      ..add(wearable.fatigue.listen(_onFatigue));
+      ..add(wearable.reps.listen(_onReps));
     wearable.addListener(_onWearableChanged);
     _loadHistory();
   }
@@ -29,42 +25,41 @@ class WorkoutController extends ChangeNotifier {
   final WearableController wearable;
   final HistoryStore _store;
   final _subs = <StreamSubscription<dynamic>>[];
-  final _counter = RepCounter();
 
   bool _active = false;
   DateTime? _startedAt;
   Timer? _clock;
-  FatigueEstimate? _fatigue;
-  double? _peakFatigue;
+  int _repsAtStart = 0;
+  int _reps = 0;
+  double? _lastRomDeg;
   List<WorkoutSet> _history = const [];
   final List<double> _motion = [];
   int _sinceRedraw = 0;
 
   bool get active => _active;
-  int get reps => _counter.reps;
+  int get reps => _reps;
   Duration get elapsed => _startedAt == null
       ? Duration.zero
       : DateTime.now().difference(_startedAt!);
-  FatigueEstimate? get fatigue => _fatigue;
+
+  /// How far the forearm swung on the set's latest rep, in degrees.
+  double? get lastRomDeg => _lastRomDeg;
+
+  /// How fast the forearm is turning (deg/s), oldest first.
   List<double> get motion => _motion;
 
   /// Newest first.
   List<WorkoutSet> get history => _history;
 
-  SetAdvice get advice {
-    final left = _fatigue?.repsLeft;
-    if (left == null || left > 2) return SetAdvice.keepGoing;
-    if (left > 0) return SetAdvice.almostDone;
-    return SetAdvice.stop;
-  }
-
   void startSet() {
     if (_active || !wearable.isConnected) return;
     _active = true;
     _startedAt = DateTime.now();
-    _counter.reset();
-    _fatigue = null;
-    _peakFatigue = null;
+    // The wearable counts reps since it booted, so this set's reps are the
+    // ones after this count.
+    _repsAtStart = wearable.lastRepUpdate?.reps ?? 0;
+    _reps = 0;
+    _lastRomDeg = null;
     _motion.clear();
     wearable.setActive(true);
     _clock = Timer.periodic(
@@ -79,8 +74,7 @@ class WorkoutController extends ChangeNotifier {
     final set = WorkoutSet(
       startedAt: _startedAt!,
       duration: elapsed,
-      reps: _counter.reps,
-      peakFatigue: _peakFatigue,
+      reps: _reps,
     );
     _stop();
     if (set.reps > 0) {
@@ -106,26 +100,21 @@ class WorkoutController extends ChangeNotifier {
 
   void _onSample(ImuSample s) {
     if (!_active) return;
-    final before = _counter.reps;
-    final v = _counter.add(s);
-    _motion.add(v);
-    const maxPoints = motionWindow * WearableProtocol.sampleRateHz;
+    _motion.add(sqrt(s.gx * s.gx + s.gy * s.gy + s.gz * s.gz));
+    const maxPoints = motionWindow * WearableProtocol.imuRateHz;
     if (_motion.length > maxPoints) _motion.removeAt(0);
     // Redraw at ~10 fps rather than on every 50 Hz packet.
-    if (_counter.reps != before || ++_sinceRedraw >= 5) {
+    if (++_sinceRedraw >= 5) {
       _sinceRedraw = 0;
       notifyListeners();
     }
   }
 
-  void _onFatigue(FatigueEstimate f) {
+  void _onReps(RepUpdate update) {
     if (!_active) return;
-    final before = advice;
-    _fatigue = f;
-    _peakFatigue = max(_peakFatigue ?? 0, f.fatigue);
-    if (advice != before && advice != SetAdvice.keepGoing) {
-      HapticFeedback.heavyImpact();
-    }
+    _reps = max(0, update.reps - _repsAtStart);
+    _lastRomDeg = update.romDeg;
+    notifyListeners();
   }
 
   void _onWearableChanged() {

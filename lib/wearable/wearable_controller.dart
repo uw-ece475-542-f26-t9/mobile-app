@@ -17,6 +17,34 @@ class FoundWearable {
     this.device,
   });
 
+  /// The wearable in a scan result, or null if the device doesn't advertise
+  /// our service.
+  ///
+  /// The scan filter alone isn't enough on Linux: BlueZ merges it with other
+  /// apps' scans (e.g. the desktop's Bluetooth settings), and
+  /// flutter_blue_plus passes on every device that turns up. Web results
+  /// carry no UUIDs, but Chrome's device picker has already filtered them.
+  static FoundWearable? fromScanResult(ScanResult r) {
+    final ours = r.advertisementData.serviceUuids.contains(
+      WearableController._serviceGuid,
+    );
+    if (!kIsWeb && !ours) return null;
+    final name = r.advertisementData.advName.isNotEmpty
+        ? r.advertisementData.advName
+        : r.device.platformName;
+    return FoundWearable(
+      id: r.device.remoteId.str,
+      // Never fill in our firmware's name, or anything that slips past the
+      // filter would look like our hardware.
+      name: name.isNotEmpty ? name : unnamed,
+      rssi: r.rssi,
+      device: r.device,
+    );
+  }
+
+  /// Shown for a device that doesn't advertise a name.
+  static const unnamed = 'Unnamed device';
+
   final String id;
   final String name;
   final int rssi;
@@ -31,6 +59,7 @@ class WearableController extends ChangeNotifier {
   static final _serviceGuid = Guid(WearableProtocol.serviceUuid);
   static final _imuCharGuid = Guid(WearableProtocol.imuCharUuid);
   static final _emgCharGuid = Guid(WearableProtocol.emgCharUuid);
+  static final _repCharGuid = Guid(WearableProtocol.repCharUuid);
 
   /// Seconds of EMG snapshots kept for the live chart.
   static const emgWindow = 10;
@@ -42,18 +71,17 @@ class WearableController extends ChangeNotifier {
   String? _error;
   int _sampleRate = 0;
   ImuSample? _latest;
-  bool _hasImu = false;
-  bool _hasEmg = false;
   final List<EmgSnapshot> _emgHistory = [];
+  RepUpdate? _lastRepUpdate;
 
   final _samples = StreamController<ImuSample>.broadcast();
   final _emg = StreamController<EmgSnapshot>.broadcast();
-  final _fatigue = StreamController<FatigueEstimate>.broadcast();
+  final _reps = StreamController<RepUpdate>.broadcast();
   final _demo = DemoWearable();
   final _subs = <StreamSubscription<dynamic>>[];
   StreamSubscription<List<ScanResult>>? _scanSub;
   Timer? _rateTimer;
-  int _packetsThisSecond = 0;
+  int _samplesThisSecond = 0;
   bool _userDisconnect = false;
 
   LinkStatus get status => _status;
@@ -66,22 +94,20 @@ class WearableController extends ChangeNotifier {
   bool get isDemo => isConnected && _connected?.device == null;
   String? get error => _error;
 
-  /// Packets received in the last second.
+  /// IMU samples received in the last second.
   int get sampleRate => _sampleRate;
   ImuSample? get latest => _latest;
-
-  /// Which sensors the connected wearable streams. The IMU and EMG run as
-  /// separate sketches for now, so a real device may have only one.
-  bool get hasImu => _hasImu;
-  bool get hasEmg => _hasEmg;
 
   /// EMG snapshots from the last [emgWindow] seconds, oldest first.
   List<EmgSnapshot> get emgHistory => _emgHistory;
   EmgSnapshot? get latestEmg => _emgHistory.lastOrNull;
 
+  /// The wearable's rep count as of its latest update.
+  RepUpdate? get lastRepUpdate => _lastRepUpdate;
+
   Stream<ImuSample> get samples => _samples.stream;
   Stream<EmgSnapshot> get emg => _emg.stream;
-  Stream<FatigueEstimate> get fatigue => _fatigue.stream;
+  Stream<RepUpdate> get reps => _reps.stream;
 
   Future<void> scan() async {
     if (_status != LinkStatus.disconnected) return;
@@ -98,19 +124,8 @@ class WearableController extends ChangeNotifier {
 
       await _scanSub?.cancel();
       _scanSub = FlutterBluePlus.onScanResults.listen((results) {
-        _found = [
-          for (final r in results)
-            FoundWearable(
-              id: r.device.remoteId.str,
-              name: r.advertisementData.advName.isNotEmpty
-                  ? r.advertisementData.advName
-                  : (r.device.platformName.isNotEmpty
-                        ? r.device.platformName
-                        : WearableProtocol.deviceName),
-              rssi: r.rssi,
-              device: r.device,
-            ),
-        ]..sort((a, b) => b.rssi.compareTo(a.rssi));
+        _found = results.map(FoundWearable.fromScanResult).nonNulls.toList()
+          ..sort((a, b) => b.rssi.compareTo(a.rssi));
         notifyListeners();
       });
 
@@ -163,7 +178,7 @@ class WearableController extends ChangeNotifier {
     _setStatus(LinkStatus.connecting);
 
     try {
-      // The 16-byte packet fits the default MTU, so no MTU request.
+      // Every packet fits the default MTU, so no MTU request.
       await device.connect(
         license: License.nonprofit,
         timeout: const Duration(seconds: 12),
@@ -174,26 +189,30 @@ class WearableController extends ChangeNotifier {
           .where((s) => s.uuid == _serviceGuid)
           .expand((s) => s.characteristics)
           .toList();
-      final imuChar = chars.where((c) => c.uuid == _imuCharGuid).firstOrNull;
-      final emgChar = chars.where((c) => c.uuid == _emgCharGuid).firstOrNull;
-      if (imuChar == null && emgChar == null) {
+      BluetoothCharacteristic? find(Guid uuid) =>
+          chars.where((c) => c.uuid == uuid).firstOrNull;
+      final imuChar = find(_imuCharGuid);
+      final emgChar = find(_emgCharGuid);
+      final repChar = find(_repCharGuid);
+      if (imuChar == null || emgChar == null || repChar == null) {
         throw 'This device is not running the Team 9 firmware.';
       }
 
-      if (imuChar != null) {
-        await _subscribe(device, imuChar, (bytes) {
-          final sample = ImuSample.fromPacket(bytes);
-          if (sample != null) _onSample(sample);
-        });
-      }
-      if (emgChar != null) {
-        await _subscribe(device, emgChar, (bytes) {
-          final snapshot = EmgSnapshot.fromPacket(bytes);
-          if (snapshot != null) _onEmg(snapshot);
-        });
-      }
-      _hasImu = imuChar != null;
-      _hasEmg = emgChar != null;
+      await _subscribe(device, imuChar, (bytes) {
+        final sample = ImuSample.fromPacket(bytes);
+        if (sample != null) _onSample(sample);
+      });
+      await _subscribe(device, emgChar, (bytes) {
+        final snapshot = EmgSnapshot.fromPacket(bytes);
+        if (snapshot != null) _onEmg(snapshot);
+      });
+      await _subscribe(device, repChar, (bytes) {
+        final update = RepUpdate.fromPacket(bytes);
+        if (update != null) _onReps(update);
+      });
+      // Notifications only come with new reps, so read where the count is
+      // now; the value arrives through the listener above.
+      await repChar.read();
 
       _subs.add(
         device.connectionState.listen((state) {
@@ -234,10 +253,8 @@ class WearableController extends ChangeNotifier {
     _subs
       ..add(_demo.samples.listen(_onSample))
       ..add(_demo.emg.listen(_onEmg))
-      ..add(_demo.fatigue.listen(_fatigue.add));
+      ..add(_demo.reps.listen(_onReps));
     _demo.start();
-    _hasImu = true;
-    _hasEmg = true;
     _connected = const FoundWearable(
       id: 'demo',
       name: 'Demo wearable',
@@ -260,24 +277,29 @@ class WearableController extends ChangeNotifier {
 
   void _onSample(ImuSample sample) {
     _latest = sample;
-    _packetsThisSecond++;
+    _samplesThisSecond++;
     _samples.add(sample);
   }
 
   void _onEmg(EmgSnapshot snapshot) {
-    _packetsThisSecond++;
     _emgHistory.add(snapshot);
     const maxSnapshots = emgWindow * WearableProtocol.emgSnapshotHz;
     if (_emgHistory.length > maxSnapshots) _emgHistory.removeAt(0);
     _emg.add(snapshot);
   }
 
+  void _onReps(RepUpdate update) {
+    _lastRepUpdate = update;
+    _reps.add(update);
+    notifyListeners();
+  }
+
   void _startRateTimer() {
     _rateTimer?.cancel();
-    _packetsThisSecond = 0;
+    _samplesThisSecond = 0;
     _rateTimer = Timer.periodic(const Duration(seconds: 1), (_) {
-      _sampleRate = _packetsThisSecond;
-      _packetsThisSecond = 0;
+      _sampleRate = _samplesThisSecond;
+      _samplesThisSecond = 0;
       notifyListeners();
     });
   }
@@ -292,9 +314,8 @@ class WearableController extends ChangeNotifier {
     _rateTimer = null;
     _sampleRate = 0;
     _latest = null;
-    _hasImu = false;
-    _hasEmg = false;
     _emgHistory.clear();
+    _lastRepUpdate = null;
     _connected = null;
     _setStatus(LinkStatus.disconnected);
   }
@@ -320,7 +341,7 @@ class WearableController extends ChangeNotifier {
     _demo.dispose();
     _samples.close();
     _emg.close();
-    _fatigue.close();
+    _reps.close();
     super.dispose();
   }
 }

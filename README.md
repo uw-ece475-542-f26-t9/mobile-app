@@ -5,7 +5,7 @@ ECE 475/542 Team 9
 
 A Flutter app for our bicep-curl fatigue wearable (ESP32 + EMG + IMU). It
 connects to the wearable over Bluetooth Low Energy (BLE), counts reps live,
-shows fatigue and reps left, and keeps a history of your sets.
+and keeps a history of your sets. Fatigue tracking comes later.
 
 **Contents**
 
@@ -38,19 +38,16 @@ The app has four parts:
 3. **Home, Workout and History tabs.**
    - **Home** shows device status, a **Start a set** shortcut, this week's
      activity, and your most recent sets.
-   - **Workout** runs a set: live rep count, a fatigue ring, reps left, an
-     arm-motion graph, and a banner that turns amber, then red, as you near
-     the end of the set. A set can't start unless a wearable is connected.
-   - **History** lists every saved set with its reps, duration and peak
-     fatigue.
+   - **Workout** runs a set: a live rep count from the wearable, how far your
+     forearm swung on the last rep, and an arm-motion graph. A set can't
+     start unless a wearable is connected.
+   - **History** lists every saved set with its reps and duration.
 4. **Connection chip.** The chip in the top-right corner shows whether the
    wearable is connected. Tap it to reconnect or disconnect.
 
-> **Note:** the current firmware streams raw sensor data only: IMU motion,
-> and EMG snapshots from a separate sketch. Rep counting works with the IMU
-> firmware and EMG readings show under **Sensor check**, but **fatigue % and
-> reps left only appear with the demo wearable** until the firmware also
-> sends the model's output. See
+> **Note:** the wearable counts reps itself from its IMU. Fatigue isn't
+> estimated yet: the EMG readings show under **Sensor check**, but nothing
+> uses them so far. See
 > [Connecting to the wearable](#connecting-to-the-wearable).
 
 ---
@@ -64,11 +61,11 @@ You do **not** need a separate Flutter install.
 
 ### 1. Install the basics
 
-| Tool | macOS | Windows | Linux |
-|---|---|---|---|
-| Git | `xcode-select --install` | [git-scm.com](https://git-scm.com/download/win) | `sudo apt install git` |
-| mise | `curl https://mise.run \| sh` | `winget install jdx.mise` | `curl https://mise.run \| sh` |
-| Google Chrome | [google.com/chrome](https://www.google.com/chrome/) | same | same |
+| Tool          | macOS                                               | Windows                                         | Linux                         |
+| ------------- | --------------------------------------------------- | ----------------------------------------------- | ----------------------------- |
+| Git           | `xcode-select --install`                            | [git-scm.com](https://git-scm.com/download/win) | `sudo apt install git`        |
+| mise          | `curl https://mise.run \| sh`                       | `winget install jdx.mise`                       | `curl https://mise.run \| sh` |
+| Google Chrome | [google.com/chrome](https://www.google.com/chrome/) | same                                            | same                          |
 
 Chrome is the quickest way to run the app (see
 [Running the app](#running-the-app)). An editor with Flutter support helps:
@@ -311,45 +308,57 @@ it from that folder; it needs the `lib/` and `data/` folders next to it.
 
 ## Connecting to the wearable
 
-There are two ESP32 sketches for now, both kept by the hardware side of the
-team. They share one BLE service, and each sensor has its own
-characteristic, so they can later be merged into one sketch without changing
-the app:
+The wearable runs `fatigue_sensor/fatigue_sensor.ino` from the
+[embedded repo](https://github.com/uw-ece475-542-f26-t9/embedded): a
+MyoWare 2.0 EMG sensor on the biceps and an MPU-6050 IMU on the forearm. It
+advertises as **`Team9-Fatigue-Sensor`** with one service and three
+characteristics, and the app only connects to a device that has all three:
 
-- `esp32_imu_ble.ino` (class tutorial) advertises as **`ESP32-IMU`** and
-  sends IMU packets.
-- `myoware_ble/myoware_ble.ino` in the
-  [embedded repo](https://github.com/uw-ece475-542-f26-t9/embedded) advertises
-  as **`ESP32-EMG`** and sends EMG snapshots from the MyoWare 2.0.
+|                                   | UUID                                   |
+| --------------------------------- | -------------------------------------- |
+| Service                           | `7fc2f476-4996-49df-b915-54e84d61fedb` |
+| IMU characteristic (notify)       | `beb5483e-36e1-4688-b7f5-ea07361b26a8` |
+| EMG characteristic (notify)       | `53e27fb3-6de1-4f27-8303-d663c79b818b` |
+| Rep characteristic (read, notify) | `65719722-b91f-43b3-adbc-7c455a80c50c` |
 
-| | UUID |
-|---|---|
-| Service | `4fafc201-1fb5-459e-8fcc-c5c9c331914b` |
-| IMU characteristic (notify) | `beb5483e-36e1-4688-b7f5-ea07361b26a8` |
-| EMG characteristic (notify) | `53e27fb3-6de1-4f27-8303-d663c79b818b` |
+All packets are little-endian and fit the default BLE packet size, so the
+app never asks for a bigger MTU.
 
-The app connects to a device that has either characteristic or both.
+**IMU**, every 20 ms (50 Hz), 16 bytes:
 
-The IMU characteristic sends a 16-byte little-endian packet every 20 ms
-(50 Hz):
+| Bytes | Type     | Field      | Units                                   |
+| ----- | -------- | ---------- | --------------------------------------- |
+| 0–3   | uint32   | timestamp  | ms since boot                           |
+| 4–9   | int16 ×3 | ax, ay, az | milli-g (1000 = 1 g)                    |
+| 10–15 | int16 ×3 | gx, gy, gz | 0.1 °/s (10 = 1 °/s), gyro bias removed |
 
-| Bytes | Type | Field | Units |
-|---|---|---|---|
-| 0–3 | uint32 | timestamp | ms since boot |
-| 4–9 | int16 ×3 | ax, ay, az | milli-g (1000 = 1 g) |
-| 10–15 | int16 ×3 | gx, gy, gz | 0.1 °/s (10 = 1 °/s) |
+**EMG**, every 100 ms (10 Hz), 14 bytes. The wearable samples the MyoWare's
+RAW output at 2 kHz, and each packet summarizes the samples from the last
+100 ms (about 200). Voltages are as measured at the ESP32's ADC pin:
 
-The EMG sketch samples the MyoWare's RAW output at 2 kHz. Every 100 ms
-(10 Hz) it sends a 14-byte little-endian snapshot of the samples from that
-window (about 200). Voltages are as measured at the ESP32's ADC pin:
+| Bytes | Type      | Field               | Units                                   |
+| ----- | --------- | ------------------- | --------------------------------------- |
+| 0–3   | uint32    | timestamp           | ms since boot, at the end of the window |
+| 4–5   | uint16    | sample count        | samples in the window                   |
+| 6–7   | uint16    | mean                | mV (the DC level the signal sits on)    |
+| 8–9   | uint16    | RMS around the mean | mV (rises when the muscle contracts)    |
+| 10–13 | uint16 ×2 | min, max            | mV                                      |
 
-| Bytes | Type | Field | Units |
-|---|---|---|---|
-| 0–3 | uint32 | timestamp | ms since boot, at the end of the window |
-| 4–5 | uint16 | sample count | samples in the window |
-| 6–7 | uint16 | mean | mV (the DC level the signal sits on) |
-| 8–9 | uint16 | RMS around the mean | mV (rises when the muscle contracts) |
-| 10–13 | uint16 ×2 | min, max | mV |
+**Reps**, each time the wearable counts one, 8 bytes:
+
+| Bytes | Type   | Field           | Units                     |
+| ----- | ------ | --------------- | ------------------------- |
+| 0–3   | uint32 | timestamp       | ms since boot             |
+| 4–5   | uint16 | reps            | counted since boot        |
+| 6–7   | uint16 | range of motion | 0.1 ° (of the latest rep) |
+
+The wearable counts reps itself (`fatigue_sensor/rep_counter.h`). It learns
+which way the forearm turns about the elbow, so the IMU can be strapped on
+any way round, and counts a rep when the forearm swings at least 45° one way
+and back. The count runs from when the wearable booted: the app reads it when
+it connects, and a set's reps are the ones counted after you tap **Start**.
+The IMU has to be on the forearm; on the upper arm it barely moves during a
+curl.
 
 These constants live in
 [`lib/wearable/protocol.dart`](lib/wearable/protocol.dart). **If you change
@@ -358,22 +367,18 @@ tests in `test/wearable_test.dart` check the packet decoding.
 
 To connect:
 
-1. Flash a sketch to the ESP32 and power it on. With `USE_FAKE_DATA 1` the
-   IMU sketch streams sine waves, so you can test without an IMU wired up.
+1. Flash `fatigue_sensor.ino` to the ESP32 and power it on. Keep it still
+   for a couple of seconds after it boots so it can learn the gyro's bias.
 2. In the app, tap **Connect**. Devices running our firmware appear under
    **Nearby wearables**; tap **Connect** next to one.
-3. The status card turns green. **Sensor check** shows about 50 packets/s
-   from the IMU sketch, or 10 from the EMG sketch. With the EMG sketch, flex
-   your biceps and the muscle activity line should jump.
+3. The status card turns green and **Sensor check** shows the IMU at about
+   50 Hz. Curl and the **Reps** total goes up; flex your biceps and the muscle
+   activity line jumps.
 
 Things to know:
 
 - **Only one phone can be connected at a time.** If the wearable doesn't
   show up, make sure no one else's phone is connected to it.
-- **Every team using the class tutorial firmware has the same name and
-  UUIDs.** If you see several `ESP32-IMU` devices, pick the one with the
-  strongest signal (closest to you), or rename yours in the sketch's
-  `DEVICE_NAME`.
 - **Phones:** the app asks for Bluetooth permission the first time you tap
   Connect. The permissions are already set up in `AndroidManifest.xml`,
   `Info.plist` and the macOS entitlements.
@@ -385,10 +390,9 @@ Things to know:
   system Bluetooth settings.** The app connects to it directly, and a
   connection from the system settings can stop the app from seeing it. If you
   already paired it, remove it with `bluetoothctl remove <MAC address>`.
-- **Fatigue and reps left:** the app is ready to display them
-  (`FatigueEstimate` in `protocol.dart`), but the firmware doesn't send them
-  yet. Once the on-board model is running, it needs another characteristic for
-  its output, and `WearableController` needs to subscribe to it.
+- **Fatigue:** not estimated yet. When it is, it needs another
+  characteristic for its output, and `WearableController` needs to subscribe
+  to it.
 
 ---
 
@@ -401,21 +405,20 @@ lib/
 │   ├── splash_screen.dart      Animated intro
 │   ├── connect_screen.dart     Scan / connect / disconnect, live IMU and EMG check
 │   ├── home_screen.dart        Dashboard: device, start a set, weekly activity, recent sets
-│   ├── workout_screen.dart     Live set: reps, fatigue ring, advice banner, motion graph
+│   ├── workout_screen.dart     Live set: reps, last rep's range of motion, motion graph
 │   └── history_screen.dart     All saved sets with stats and a reps chart
 ├── wearable/
 │   ├── protocol.dart           BLE UUIDs and packet decoding (keep in sync with firmware)
 │   ├── wearable_controller.dart  BLE scanning/connection via flutter_blue_plus
 │   └── demo_wearable.dart      Simulated wearable for development without hardware
 ├── workout/
-│   ├── rep_counter.dart        Counts curls from the forearm gyroscope
-│   ├── workout_controller.dart Set state, fatigue advice, haptics
+│   ├── workout_controller.dart Set state, reps from the wearable's counter
 │   └── history_store.dart      Saves sets on the device (shared_preferences)
 └── widgets/
     ├── charts.dart             Fatigue ring, motion/EMG line, bar charts
     └── tiles.dart              Stat tile and set row shared by Home and History
 test/
-├── wearable_test.dart          Packet decoding and rep counting
+├── wearable_test.dart          Packet decoding and scan filtering
 └── widget_test.dart            End-to-end UI flow using the demo wearable
 ```
 
@@ -519,12 +522,14 @@ for iOS and macOS builds.
 
 **The wearable never appears when scanning**  
 Check that it's powered on and advertising (the serial monitor prints
-`Advertising as ESP32-IMU` or `Advertising as ESP32-EMG`), that Bluetooth is on, and that no other phone is
+`Advertising as Team9-Fatigue-Sensor`), that Bluetooth is on, and that no other phone is
 connected to it. Tap **Connect** again; each scan lasts 8 seconds.
 
 **"This device is not running the Team 9 firmware."**  
 It connected, but the service or characteristic UUIDs don't match. Compare
-the sketch's `#define`s with `lib/wearable/protocol.dart`.
+the sketch's `#define`s with `lib/wearable/protocol.dart`. On Linux, BlueZ
+can also remember an older firmware's services after you reflash the ESP32;
+run `bluetoothctl remove <MAC address>` and connect again.
 
 **Weird `git status`: every image shows as modified**  
 You're on an old checkout from before the `.gitattributes` fix. Pull `main`;
