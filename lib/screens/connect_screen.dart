@@ -370,6 +370,7 @@ class _LiveSensorCard extends StatelessWidget {
   Widget build(BuildContext context) {
     final text = Theme.of(context).textTheme;
     final s = wearable.latest;
+    final r = wearable.lastRepUpdate;
     String f(double? v, int digits) => v?.toStringAsFixed(digits) ?? '–';
     return Card(
       child: Padding(
@@ -381,25 +382,31 @@ class _LiveSensorCard extends StatelessWidget {
               children: [
                 Text('Sensor check', style: text.titleMedium),
                 const Spacer(),
-                Text('${wearable.sampleRate} packets/s', style: text.bodySmall),
+                Text('IMU ${wearable.sampleRate} Hz', style: text.bodySmall),
               ],
             ),
-            if (wearable.hasImu) ...[
-              const SizedBox(height: 12),
-              _AxisRow(
-                label: 'Accel (g)',
-                values: [f(s?.ax, 2), f(s?.ay, 2), f(s?.az, 2)],
-              ),
-              const SizedBox(height: 8),
-              _AxisRow(
-                label: 'Gyro (°/s)',
-                values: [f(s?.gx, 0), f(s?.gy, 0), f(s?.gz, 0)],
-              ),
-            ],
-            if (wearable.hasEmg) ...[
-              const SizedBox(height: 12),
-              _EmgCheck(wearable: wearable),
-            ],
+            const SizedBox(height: 12),
+            _AxisRow(
+              label: 'Accel (g)',
+              values: [f(s?.ax, 2), f(s?.ay, 2), f(s?.az, 2)],
+            ),
+            const SizedBox(height: 8),
+            _AxisRow(
+              label: 'Gyro (°/s)',
+              values: [f(s?.gx, 0), f(s?.gy, 0), f(s?.gz, 0)],
+            ),
+            const SizedBox(height: 8),
+            // Curl here to check the rep counter without starting a set.
+            _AxisRow(
+              label: 'Reps',
+              names: const ['total', 'range'],
+              values: [
+                r?.reps.toString() ?? '–',
+                r == null || r.reps == 0 ? '–' : '${r.romDeg.round()}°',
+              ],
+            ),
+            const SizedBox(height: 12),
+            _EmgCheck(wearable: wearable),
           ],
         ),
       ),

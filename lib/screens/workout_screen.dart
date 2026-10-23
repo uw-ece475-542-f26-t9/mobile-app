@@ -92,8 +92,8 @@ class _Ready extends StatelessWidget {
         ),
         const SizedBox(height: 8),
         Text(
-          'Start curling after you tap Start. We count your reps and tell '
-          'you when to stop, a couple of reps before failure.',
+          'Tap Start, then curl. The wearable counts a rep each time your '
+          'forearm swings up and back down.',
           textAlign: TextAlign.center,
           style: text.bodyMedium,
         ),
@@ -140,21 +140,27 @@ class _ActiveSet extends StatelessWidget {
   Widget build(BuildContext context) {
     final text = Theme.of(context).textTheme;
     final scheme = Theme.of(context).colorScheme;
-    final fatigue = workout.fatigue;
+    final rom = workout.lastRomDeg;
 
     return Column(
       children: [
-        _AdviceBanner(advice: workout.advice, fatigue: fatigue != null),
         Expanded(
           child: ListView(
             padding: const EdgeInsets.all(16),
             children: [
-              SizedBox(
-                height: 230,
-                child: FatigueRing(
-                  fatigue: fatigue?.fatigue,
+              Center(
+                child: Container(
+                  width: 230,
+                  height: 230,
+                  decoration: BoxDecoration(
+                    shape: BoxShape.circle,
+                    border: Border.all(
+                      color: scheme.surfaceContainerHighest,
+                      width: 14,
+                    ),
+                  ),
                   child: Column(
-                    mainAxisSize: MainAxisSize.min,
+                    mainAxisAlignment: MainAxisAlignment.center,
                     children: [
                       Text(
                         '${workout.reps}',
@@ -175,27 +181,12 @@ class _ActiveSet extends StatelessWidget {
               Row(
                 children: [
                   _Stat(
-                    label: 'Reps left',
-                    value: fatigue == null ? '–' : '${fatigue.repsLeft}',
-                  ),
-                  _Stat(
-                    label: 'Fatigue',
-                    value: fatigue == null
-                        ? '–'
-                        : '${(fatigue.fatigue * 100).round()}%',
+                    label: 'Last rep range',
+                    value: rom == null ? '–' : '${rom.round()}°',
                   ),
                   _Stat(label: 'Time', value: _formatDuration(workout.elapsed)),
                 ],
               ),
-              if (fatigue == null) ...[
-                const SizedBox(height: 8),
-                Text(
-                  'Fatigue and reps left appear once the wearable streams '
-                  'the model output.',
-                  textAlign: TextAlign.center,
-                  style: text.bodySmall,
-                ),
-              ],
               const SizedBox(height: 16),
               Card(
                 child: Padding(
@@ -205,14 +196,18 @@ class _ActiveSet extends StatelessWidget {
                     children: [
                       Text('Arm motion', style: text.titleSmall),
                       Text(
-                        'Forearm rotation speed, last '
+                        'How fast your forearm is turning, last '
                         '${WorkoutController.motionWindow} s',
                         style: text.bodySmall,
                       ),
                       const SizedBox(height: 12),
                       SizedBox(
                         height: 90,
-                        child: MotionLine(values: workout.motion),
+                        child: MotionLine(
+                          values: workout.motion,
+                          range: 250,
+                          signed: false,
+                        ),
                       ),
                     ],
                   ),
@@ -239,56 +234,6 @@ class _ActiveSet extends StatelessWidget {
           ),
         ),
       ],
-    );
-  }
-}
-
-class _AdviceBanner extends StatelessWidget {
-  const _AdviceBanner({required this.advice, required this.fatigue});
-
-  final SetAdvice advice;
-  final bool fatigue;
-
-  @override
-  Widget build(BuildContext context) {
-    final (color, icon, message) = switch (advice) {
-      SetAdvice.keepGoing => (
-        const Color(0xFF2E9E6A),
-        Icons.trending_up,
-        fatigue ? 'Looking strong — keep going' : 'Set in progress',
-      ),
-      SetAdvice.almostDone => (
-        const Color(0xFFE0A100),
-        Icons.warning_amber_rounded,
-        'Almost there — finish your last reps',
-      ),
-      SetAdvice.stop => (
-        const Color(0xFFD9452B),
-        Icons.front_hand,
-        'Stop now — rack the weight',
-      ),
-    };
-    return AnimatedContainer(
-      duration: const Duration(milliseconds: 300),
-      width: double.infinity,
-      color: color,
-      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
-      child: Row(
-        children: [
-          Icon(icon, color: Colors.white),
-          const SizedBox(width: 12),
-          Expanded(
-            child: Text(
-              message,
-              style: const TextStyle(
-                color: Colors.white,
-                fontWeight: FontWeight.w600,
-                fontSize: 16,
-              ),
-            ),
-          ),
-        ],
-      ),
     );
   }
 }

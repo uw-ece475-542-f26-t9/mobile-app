@@ -177,7 +177,7 @@ class _StartCard extends StatelessWidget {
     final (title, subtitle) = active
         ? ('Set in progress', 'Jump back to your live reps')
         : connected
-        ? ('Start a set', 'Bicep curls · live rep count & fatigue')
+        ? ('Start a set', 'Bicep curls · live rep count')
         : ('Connect to start', 'Pair your wearable to track a set');
     return Material(
       borderRadius: BorderRadius.circular(24),

@@ -23,8 +23,10 @@ void main() {
     await tester.pump();
     expect(find.text('Connected'), findsOneWidget);
 
-    // The sensor check shows both sensors, and EMG snapshots arrive.
+    // The sensor check shows the IMU, rep counter and EMG, and EMG
+    // snapshots arrive.
     expect(find.text('Gyro (°/s)'), findsOneWidget);
+    expect(find.text('Reps'), findsOneWidget);
     expect(find.text('EMG (mV)'), findsOneWidget);
     expect(find.text('rms –'), findsOneWidget);
     await tester.pump(const Duration(milliseconds: 300));
@@ -40,11 +42,14 @@ void main() {
     await tester.tap(find.text('Start'));
     await tester.pump();
 
-    // Demo curls take ~2.2 s each; give it time for at least one rep.
+    // Demo curls take ~2.2 s each; give it time for a couple of reps.
+    expect(find.text('0'), findsOneWidget);
     for (var i = 0; i < 60; i++) {
       await tester.pump(const Duration(milliseconds: 100));
     }
-    expect(find.text('Reps left'), findsOneWidget);
+    expect(find.text('0'), findsNothing);
+    expect(find.text('Last rep range'), findsOneWidget);
+    expect(find.textContaining('°'), findsOneWidget);
     await tester.tap(find.text('End set'));
     await tester.pumpAndSettle();
 

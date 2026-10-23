@@ -5,29 +5,30 @@ import 'protocol.dart';
 
 /// A simulated wearable so the app can be designed and demoed without the
 /// ESP32. It idles until a set starts, then streams bicep-curl motion that
-/// slows down as simulated fatigue builds, EMG snapshots that rise with each
-/// curl, and a fatigue estimate like the on-board model will eventually send.
+/// slows down and shortens as simulated fatigue builds, EMG snapshots that
+/// rise with each curl, and rep updates like the firmware's rep counter.
 class DemoWearable {
   static const _failureReps = 12;
-  static const _safeReps = 10;
 
   final _samples = StreamController<ImuSample>.broadcast();
   final _emg = StreamController<EmgSnapshot>.broadcast();
-  final _fatigue = StreamController<FatigueEstimate>.broadcast();
+  final _reps = StreamController<RepUpdate>.broadcast();
   final _random = Random();
 
   Timer? _timer;
   int _clockMs = 0;
   bool _active = false;
   double _phase = 0; // completed curl cycles, fractional
+  int _repCount = 0; // since "boot", like the firmware
+  int _repsThisSet = 0;
 
   Stream<ImuSample> get samples => _samples.stream;
   Stream<EmgSnapshot> get emg => _emg.stream;
-  Stream<FatigueEstimate> get fatigue => _fatigue.stream;
+  Stream<RepUpdate> get reps => _reps.stream;
 
   void start() {
     _timer ??= Timer.periodic(
-      const Duration(milliseconds: 1000 ~/ WearableProtocol.sampleRateHz),
+      const Duration(milliseconds: 1000 ~/ WearableProtocol.imuRateHz),
       (_) => _tick(),
     );
   }
@@ -41,11 +42,12 @@ class DemoWearable {
   void setActive(bool active) {
     _active = active;
     _phase = 0;
+    _repsThisSet = 0;
   }
 
   void _tick() {
-    const dt = 1 / WearableProtocol.sampleRateHz;
-    _clockMs += 1000 ~/ WearableProtocol.sampleRateHz;
+    const dt = 1 / WearableProtocol.imuRateHz;
+    _clockMs += 1000 ~/ WearableProtocol.imuRateHz;
     double noise(double scale) => (_random.nextDouble() - 0.5) * scale;
 
     var gx = noise(4.0), gy = noise(4.0), gz = noise(4.0);
@@ -54,12 +56,13 @@ class DemoWearable {
 
     if (_active) {
       final progress = min(_phase / _failureReps, 1.0);
-      // Reps get slower and weaker as fatigue builds.
+      // Reps get slower and shorter as fatigue builds.
       final periodS = 2.2 + 1.8 * progress * progress;
-      final amplitude = 140 - 60 * progress;
+      final romDeg = 130 - 50 * progress;
       _phase += dt / periodS;
       final angle = 2 * pi * _phase;
-      gx = amplitude * sin(angle) + noise(8);
+      // The elbow angle goes 0 -> romDeg -> 0 each cycle; gx is its rate.
+      gx = romDeg * pi / periodS * sin(angle) + noise(8);
       gy += 15 * progress * sin(angle * 2); // late-set wobble
       ax += 0.4 * sin(angle);
       ay += 0.3 * cos(angle);
@@ -67,14 +70,12 @@ class DemoWearable {
       // tiring muscle recruits more fibres for the same curl.
       effort = (0.45 + 0.35 * sin(angle)) * (1 + 0.5 * progress);
 
-      if (_clockMs % 100 == 0) {
-        // The rep counter registers a curl on the way down (~3/4 cycle).
-        final reps = (_phase + 0.25).floor();
-        _fatigue.add(
-          FatigueEstimate(
-            fatigue: min(_phase / _failureReps, 1.0),
-            repsLeft: max(0, _safeReps - reps),
-          ),
+      // Like the firmware, count each curl part way down (~3/4 cycle).
+      if ((_phase + 0.25).floor() > _repsThisSet) {
+        _repsThisSet++;
+        _repCount++;
+        _reps.add(
+          RepUpdate(timestampMs: _clockMs, reps: _repCount, romDeg: romDeg),
         );
       }
     }
@@ -114,6 +115,6 @@ class DemoWearable {
     stop();
     _samples.close();
     _emg.close();
-    _fatigue.close();
+    _reps.close();
   }
 }
