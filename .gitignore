@@ -46,3 +46,7 @@ app.*.map.json
 
 # Widget Preview related
 .widget_preview/
+
+# Exported training data (study data; keep it out of git)
+fatigue-set_*.json
+fatigue-training-data_*.json
