@@ -18,6 +18,7 @@ and keeps a history of your sets. Fatigue tracking comes later.
   - [5. Optional: Android, iOS and Linux toolchains](#5-optional-android-ios-and-linux-toolchains)
 - [Running the app](#running-the-app)
 - [Connecting to the wearable](#connecting-to-the-wearable)
+- [Fatigue model training](#fatigue-model-training)
 - [Project layout](#project-layout)
 - [Before you push: format, analyze, test](#before-you-push-format-analyze-test)
 - [Git workflow](#git-workflow)
@@ -38,17 +39,21 @@ The app has four parts:
 3. **Home, Workout and History tabs.**
    - **Home** shows device status, a **Start a set** shortcut, this week's
      activity, and your most recent sets.
-   - **Workout** runs a set: a live rep count from the wearable, how far your
-     forearm swung on the last rep, and an arm-motion graph. A set can't
-     start unless a wearable is connected.
+   - **Workout** runs a set: a live rep count from the wearable, a fatigue
+     ring, safe reps left, how far your forearm swung on the last rep, and an
+     arm-motion graph. The banner turns amber, then red, as you near the safe
+     stopping point (2 reps before predicted failure). A set can't start
+     unless a wearable is connected. **Record for model training** saves
+     labelled sets for training the fatigue model (see
+     [Fatigue model training](#fatigue-model-training)).
    - **History** lists every saved set with its reps and duration.
 4. **Connection chip.** The chip in the top-right corner shows whether the
    wearable is connected. Tap it to reconnect or disconnect.
 
-> **Note:** the wearable counts reps itself from its IMU. Fatigue isn't
-> estimated yet: the EMG readings show under **Sensor check**, but nothing
-> uses them so far. See
-> [Connecting to the wearable](#connecting-to-the-wearable).
+> **Note:** the wearable counts reps itself from its IMU. The app estimates
+> fatigue after every rep from IMU, range-of-motion and EMG features. Until
+> a trained model is bundled, it uses a velocity-loss baseline. See
+> [Fatigue model training](#fatigue-model-training).
 
 ---
 
@@ -390,9 +395,110 @@ Things to know:
   system Bluetooth settings.** The app connects to it directly, and a
   connection from the system settings can stop the app from seeing it. If you
   already paired it, remove it with `bluetoothctl remove <MAC address>`.
-- **Fatigue:** not estimated yet. When it is, it needs another
-  characteristic for its output, and `WearableController` needs to subscribe
-  to it.
+- **Fatigue:** estimated in the app from the three streams (see
+  [Fatigue model training](#fatigue-model-training)). The firmware doesn't
+  send a fatigue value.
+
+---
+
+## Fatigue model training
+
+The app predicts **reps to failure** (reps in reserve) after every rep, and
+from that shows fatigue % and safe reps left. Here's how a model gets
+trained.
+
+### How it works
+
+1. **Per-rep features**
+   ([`lib/fatigue/rep_features.dart`](lib/fatigue/rep_features.dart)). Each
+   time the wearable counts a rep, the app summarizes that rep from the
+   streams:
+
+   | Feature | What it captures |
+   |---|---|
+   | `velocity_loss` | How much slower the peak forearm speed is than the set's first 2 reps. This is the velocity-based-training fatigue measure. |
+   | `duration_ratio` | How much longer the rep took (moving time only). |
+   | `rom_ratio` | Range of motion compared with the start. It shrinks as form breaks down. |
+   | `emg_ratio` | EMG RMS compared with the start. A tiring muscle recruits more fibres. |
+   | `emg_per_velocity_ratio` | EMG per unit of speed. It rises when it takes more effort to move the same weight. |
+   | `rep_index` | Which rep of the set this is. |
+
+   Features are relative to the start of the same set, so a model trained
+   on other people carries over to a new user.
+2. **Models**
+   ([`lib/fatigue/fatigue_model.dart`](lib/fatigue/fatigue_model.dart)).
+   - **Velocity baseline:** the default. It extrapolates the velocity-loss
+     trend to 50% loss. The 50% figure is a rough number from the
+     literature, not calibrated.
+   - **Trained model:** a linear model that the training script writes to
+     `assets/models/fatigue_model.json`. The app loads it at startup if it's
+     there.
+
+   The model in use is shown under the Start button and during a set.
+3. **Labels.** After a recorded set, the lifter says whether they went to
+   failure and, if not, how many reps they had left. Every rep then gets a
+   target: `reps to failure = reps done + reps left at the end - rep index`.
+
+### Collecting data
+
+1. Connect the wearable, open **Workout**, and turn on **Record for model
+   training**.
+2. Tap **Start** and curl. **For training, go to failure** (or as close as is
+   safe). Sets that stop well short of failure carry less information.
+3. Tap **End set**, then fill in the label form: subject ID (anonymous, e.g.
+   `S01`), weight, whether it went to failure (or reps left), and optionally
+   RPE and notes.
+4. **Save & export** keeps the set on the device and exports a JSON file:
+   a download in Chrome, the share sheet on a phone. The file includes the
+   raw IMU, EMG and rep streams, so features can be recomputed later without
+   re-recording. **Export** on the training card exports every stored set
+   (features and labels only) as one file.
+
+Aim for several sets per person at different weights. Use the same subject
+ID for the same person every time.
+
+### Training
+
+Put the exported files in a folder (don't commit them; they're study data)
+and run:
+
+```bash
+python3 tools/train_fatigue_model.py ~/Downloads/fatigue-*.json
+```
+
+It uses only the Python standard library. It prints:
+
+- **Held-out evaluation.** Leave-one-person-out, or leave-one-set-out with a
+  single person. It compares a mean-only floor, the **velocity-only**
+  baseline and the **full** IMU+EMG model. Results are given as MAE in
+  reps, the share of predictions within ±1 rep, and how often a "stop" call
+  was right.
+- **Personal models.** Each person is trained on only their own other sets,
+  for the pooled vs per-user comparison.
+- **The final model's coefficients.**
+
+It then writes `assets/models/fatigue_model.json`. Rebuild or restart the
+app (`R` in `flutter run`) to use it. Options:
+
+- `--features velocity`: train the velocity-only model instead.
+- `--ridge 5`: apply more regularization when data is scarce.
+- `--dry-run`: evaluate only, without writing the model.
+
+### Limits to keep in mind
+
+- **Demo data proves nothing.** The demo wearable's "fatigue" is made up, so
+  training on it only checks that the pipeline works.
+- **EMG median frequency isn't available.** The firmware sends EMG RMS,
+  mean, min and max, but not its frequency content. The median-frequency
+  shift is the classic EMG fatigue marker. Computing it per rep on the ESP32
+  (from the 2 kHz raw samples) and sending it would likely be the most
+  useful next feature.
+- **The rep count must be right.** Labels are counted from the wearable's
+  reps. If it misses or double-counts a rep, note it in the set's notes and
+  consider discarding the set.
+- **The model runs in the app, not on the ESP32.** A linear model is a few
+  multiply-adds, so porting it to the firmware later is straightforward:
+  copy the `mean`, `std`, `coef` and `intercept` from the JSON.
 
 ---
 
@@ -405,28 +511,39 @@ lib/
 │   ├── splash_screen.dart      Animated intro
 │   ├── connect_screen.dart     Scan / connect / disconnect, live IMU and EMG check
 │   ├── home_screen.dart        Dashboard: device, start a set, weekly activity, recent sets
-│   ├── workout_screen.dart     Live set: reps, last rep's range of motion, motion graph
+│   ├── workout_screen.dart     Live set: reps, fatigue ring, advice; training toggle and labels
 │   └── history_screen.dart     All saved sets with stats and a reps chart
+├── fatigue/
+│   ├── rep_features.dart       Per-rep features (velocity loss, ROM, EMG ratios…)
+│   ├── fatigue_model.dart      Velocity baseline + trained linear model loader
+│   ├── training_data.dart      Labels, recorded sets, on-device training store
+│   └── file_export*.dart       Download (web) / share sheet (phones) for exports
 ├── wearable/
 │   ├── protocol.dart           BLE UUIDs and packet decoding (keep in sync with firmware)
 │   ├── wearable_controller.dart  BLE scanning/connection via flutter_blue_plus
 │   └── demo_wearable.dart      Simulated wearable for development without hardware
 ├── workout/
-│   ├── workout_controller.dart Set state, reps from the wearable's counter
+│   ├── workout_controller.dart Set state, reps, live fatigue, training recording
 │   └── history_store.dart      Saves sets on the device (shared_preferences)
 └── widgets/
     ├── charts.dart             Fatigue ring, motion/EMG line, bar charts
     └── tiles.dart              Stat tile and set row shared by Home and History
+assets/models/                  fatigue_model.json goes here (from the training script)
+tools/
+└── train_fatigue_model.py      Trains and evaluates the fatigue model
 test/
+├── fatigue_test.dart           Features, models, export format, labelling flow
 ├── wearable_test.dart          Packet decoding and scan filtering
 └── widget_test.dart            End-to-end UI flow using the demo wearable
 ```
 
 Packages we use:
 [`flutter_blue_plus`](https://pub.dev/packages/flutter_blue_plus) for BLE
-(free under its license for educational use), and
+(free under its license for educational use),
 [`shared_preferences`](https://pub.dev/packages/shared_preferences) for saving
-history.
+history and training sets, and
+[`share_plus`](https://pub.dev/packages/share_plus) for exporting training
+files on phones.
 
 ---
 
